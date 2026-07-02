@@ -1,0 +1,14 @@
+[project]
+name = "kernel-swing"
+version = "0.1.0"
+description = "Local Hugging Face and Triton inference benchmarks"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate",
+    "matplotlib>=3.10.9",
+    "numpy",
+    "pandas",
+    "torch",
+    "transformers",
+    "triton",
+]
