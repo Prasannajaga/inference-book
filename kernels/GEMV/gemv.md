@@ -226,6 +226,7 @@ partial_sum = warp_sum(partial_sum);
 ```
 
 * **Note**: Fits FP16 vectors up to the 48 KiB shared memory limit ($20096 \times 2\text{ bytes} \approx 40.2\text{ KB}$). For FP32, it requires $80.4\text{ KB}$ and automatically falls back to `v1`.
+* **The Impact**: Storing the entire vector in shared memory eliminated loop-level synchronization barriers and redundant global reads of `x`, maximizing memory bandwidth utilization for FP16.
 
 ### 7. Direct cuBLAS GEMV
 
@@ -245,33 +246,34 @@ CUBLAS_CHECK(cublasGemmEx(
 
 ## 4. Benchmarking Results
 
-To evaluate the performance of our custom CUDA kernels, we benchmarked all seven implementations on our local NVIDIA GeForce RTX 4050 Laptop GPU. Below are the execution results for both FP16 and FP32 precisions, comparing latency, logical memory bandwidth, and peak bandwidth utilization:
+To evaluate our custom CUDA kernels, I benchmarked all seven implementations on my local NVIDIA GeForce RTX 4050 Laptop GPU. Below are the execution results for both FP16 and FP32 precisions, comparing latency, logical memory bandwidth, and peak bandwidth utilization.
+
+Let's dive into the plots to see exactly what worked, what didn't, and where we hit the physical limits of the hardware:
+
+### Benchmarking Methodology
+
+To keep things clean and reproducible, I set up a dedicated notebook, [gemv_benchmark.ipynb](gemv_benchmark.ipynb). We compiled and ran our kernels using PyTorch's inline C++ extension helper. To get accurate and stable timings, we used asynchronous CUDA events with **25 warmup iterations** to prime the GPU driver, followed by **100 repetitions** to measure the average latency. All outputs were verified against a stable FP32 reference baseline (`torch.matmul` in FP32) to guarantee numerical correctness.
 
 ### 1. Latency (µs)
-
-This plot compares the execution latency in microseconds. A lower value indicates a faster kernel.
+This plot compares the execution latency in microseconds.
 ![Execution Latency Comparison](latency.png)
 
 * **Key Takeaways**:
-  * **Naive CUDA is by far the slowest**: Stalling at 15,020 µs in FP16 and 26,729 µs in FP32 due to non-coalesced loads and serial thread execution.
-  * **We beat PyTorch and cuBLAS on FP32 latency**: Our Custom Optimized CUDA (Block-per-Row) achieved **8,604.58 µs**, beating PyTorch (8,957.48 µs) and cuBLAS direct (8,626.20 µs). This is because our custom kernel runs directly with zero PyTorch runtime dispatch wrapper overhead. PyTorch has to do dynamic shape checking, memory allocation, and algorithm selection, which adds CPU-GPU dispatch latency. Because FP32 execution takes longer (~8.6 ms), our raw kernel's low launch overhead makes it the winner.
-  * **We failed to beat PyTorch on FP16 latency**: PyTorch achieved **4,305.50 µs**, while our best Custom Optimized CUDA v3 took **4,333.57 µs** (missing PyTorch by ~28 µs). Analyzing `gemv_kernels.cu`, our v3 kernel launches 2,512 blocks (`(20096 + 8 - 1) / 8`). Because each block cooperatively pre-stages the entire vector into shared memory at block startup:
-    $$\text{Grid Vector Traffic} = 2,512 \text{ blocks} \times 20,096 \text{ elements} \times 2 \text{ bytes} \approx 101 \text{ MB}$$
-    This redundant loading of the vector across blocks represents an extra **12.5%** of memory traffic over the 807.7 MB matrix. At FP16's fast execution speed, this redundant traffic and the block startup `__syncthreads()` barrier become the bottleneck. PyTorch's backend uses highly optimized tiling/persistent-block architectures to reuse the vector across rows and minimize redundant VRAM reads.
+  * **Naive CUDA is the slowest**: Stalling at 15,020 µs (FP16) and 26,729 µs (FP32) due to poor coalescing and serial threads.
+  * **FP32 Win**: Our custom Block-per-Row kernel achieved **8,604.58 µs**, beating PyTorch (8,957.48 µs) and cuBLAS (8,626.20 µs) by avoiding PyTorch's dynamic runtime dispatch and wrapper overhead.
+  * **FP16 Loss**: Our best custom v3 kernel (4,333.57 µs) fell slightly short of PyTorch (4,305.50 µs) by ~28 µs. The 2,512 blocks launched in v3 cooperatively pre-load the vector into shared memory, creating ~101 MB of redundant grid-wide reads (a 12.5% overhead relative to the 807.7 MB matrix). PyTorch's backend avoids this via persistent-block or tiling architectures.
 
 ### 2. Memory Bandwidth (GB/s)
-
-This plot compares the logical memory bandwidth achieved by each kernel. A higher value indicates better memory bus saturation.
+This plot compares the logical memory bandwidth achieved.
 ![Logical Memory Bandwidth Comparison](memoryBW.png)
 
-* **Key Takeaway**: Both FP16 and FP32 optimized implementations converge to around **180–187 GB/s**, effectively saturating the memory bus.
+* **Key Takeaway**: Optimized implementations achieve **163–187 GB/s** (FP16) and **179–187 GB/s** (FP32), saturating the RTX 4050's memory bus.
 
 ### 3. Peak Memory Bandwidth Utilization (%)
-
-This plot measures what percentage of the physical maximum memory bandwidth (192.02 GB/s) is saturated by the kernel.
+This plot measures the percentage of the 192.02 GB/s physical peak bandwidth achieved.
 ![Peak Memory Bandwidth Utilization](memoryPercentageBW.png)
 
-* **Key Takeaway**: The best optimized CUDA implementations (like Optimized CUDA v3 in FP16 and Block-per-Row in FP32) achieve over **97% of the hardware's peak bandwidth** (186.40 GB/s and 187.76 GB/s respectively). Utilizing this peak memory bandwidth means we are utilizing the GPU memory bus to its fullest potential, satisfying our main target of >90% saturation.
+* **Key Takeaway**: The best kernels (v3 in FP16, Block-per-Row in FP32) saturate the memory bus at **97.07%** and **97.78%** of peak physical bandwidth respectively, satisfying our peak target (>90%).
 
 *Note: Minor floating-point discrepancies under FP16 (e.g., max relative error ~0.0168) are expected and are due to the non-associative nature of parallel floating-point reduction.*
 
@@ -292,7 +294,7 @@ graph TD
 
 ### 1. From Naive to Block-Level Cooperative Reduction
 
-The Naive CUDA kernel was painfully slow because one thread did the entire serial dot product. By moving to **Optimized CUDA (Block-per-Row)**, we assigned 256 threads to run the columns in parallel. We also vectorized our memory loads using `half2` and `float2`.
+The Naive CUDA kernel was slow because each thread serially computed the entire dot product for a single row. By moving to **Optimized CUDA (Block-per-Row)**, we assigned 256 threads to compute columns in parallel. For FP16 (`half`), we vectorized global memory loads by fetching two elements at a time via `half2` (and `float2` for FP32), reducing instruction issues and memory latency stalls.
 
 * **The Result**: A massive jump in memory bandwidth from **~53.8 GB/s to 180.0 GB/s in FP16 (3.35x speedup)** and **~60.4 GB/s to 187.76 GB/s in FP32 (3.11x speedup)**. We went from stalling on memory to saturating the hardware.
 
@@ -315,38 +317,36 @@ Every warp has to load the vector `x` from global memory. Since we have 8 warps 
 
 ## 6. Key Tradeoffs & Technical Takeaways
 
-When writing custom CUDA kernels, you are constantly trading one hardware constraint for another. Here are the key tradeoffs we observed in this benchmark:
+When writing custom CUDA kernels, you are constantly trading one hardware constraint for another:
 
-### 1. Shared Memory Size Limit vs. Vector Length (v3 Fallback)
-
-Loading the entire vector `x` into shared memory (v3) is the fastest approach because it avoids global memory reloads and synchronization overhead. But it is limited by **hardware shared memory limits**.
-
-* On the RTX 4050, the default shared memory limit is **48 KiB** per block.
-* A vector of size 20,096 in FP16 takes $20096 \times 2 \text{ bytes} \approx 40.192 \text{ KB}$ (fits in shared memory).
-* A vector of size 20,096 in FP32 takes $20096 \times 4 \text{ bytes} \approx 80.384 \text{ KB}$ (does not fit in shared memory).
-* **The Tradeoff**: v3 must fallback to v1 for FP32. If we want v3 to run in FP32, we would have to dynamically request larger shared memory from the driver, which adds API overhead, or fall back to global memory loops.
+### 1. Shared Memory Size Limit vs. SM Occupancy (v3 Fallback)
+* **Constraint**: On the RTX 4050, the default shared memory limit is **48 KiB** per block.
+* **Math**: A size 20,096 vector takes $40.2\text{ KB}$ in FP16 (fits) but $80.4\text{ KB}$ in FP32 (exceeds).
+* **Tradeoff**: Requesting >48 KiB dynamic shared memory for FP32 limits active blocks per SM to **1** (down from 2 in FP16) due to the SM's physical 100 KiB shared memory ceiling. This halves occupancy and warp concurrency, degrading the SM's ability to hide global memory stalls.
 
 ### 2. Global Memory Latency vs. Synchronization Barriers (v1 vs. v2)
+* **FP16**: `v2` (4,843.61 µs) beats `v1` (4,934.18 µs) because saving global vector loads outweighs the overhead of `__syncthreads()`.
+* **FP32**: `v1` (8,614.28 µs) beats `v2` (8,996.00 µs) because the synchronization barrier overhead inside the loop dominates the savings from memory reuse.
+* **Takeaway**: Barrier syncs inside loops are only beneficial if global memory load savings outweigh the thread block serialization stall.
 
-To reuse vector elements, v2 stages them in shared memory. But sharing memory across warps in a block requires calling `__syncthreads()`.
+### 3. Memory Bandwidth Ceiling: Why We Beat cuBLAS but Match PyTorch
+* **Bandwidth Ceiling**: For a $20096 \times 20096$ GEMV, the 807 MB weight matrix fetches dominate ($99.9\%$ of time). Once memory reads are coalesced, we saturate the physical VRAM bus (hitting over 97% of the 192.02 GB/s physical peak).
+* **cuBLAS**: We beat cuBLAS direct (e.g., 4,333.57 µs vs 5,209.68 µs in FP16) because `cublasGemmEx` treats GEMV as a generic narrow GEMM with extra API dispatch overhead.
+* **PyTorch**: We match PyTorch in FP16 (4,305.50 µs vs 4,333.57 µs) but **beat PyTorch in FP32** (8,604.58 µs vs 8,957.48 µs). This is because our raw CUDA kernels execute directly with zero PyTorch runtime dispatch wrapper overhead (dynamic shape checks, allocator calls, and routing logic) which adds measurable host launch latency.
 
-* Every block synchronization forces all warps to pause and wait.
-* If your tiles are small, the warps spend more time waiting at barriers than they save on global memory loads.
-* **The Tradeoff**: v1 (which does no caching but has zero syncthreads) ended up faster than v2. **Avoid shared memory barriers in your inner loop if the global memory reads are coalesced and cheap.**
+### 4. Standalone Microbenchmarks vs. LLM Serving
+* **Reality**: While custom kernels can achieve 97% bandwidth utilization, they only optimize a single memory-bound operation.
+* **Serving Impact**: Because PyTorch is already at the physical hardware bandwidth limit, replacing it with a custom GEMV kernel yields no measurable difference in end-to-end LLM serving.
+* **Takeaway**: Focus custom kernel work on element-wise layer fusion (RMSNorm, SwiGLU, RoPE) where you can prevent memory traffic from going back to VRAM.
 
-### 3. The Memory Bandwidth Bottleneck (Why We Can't Beat cuBLAS)
+---
 
-For a $20096 \times 20096$ GEMV, the weight matrix $W$ is **807 MB** in FP16. The vector $x$ is only **40 KB**.
-The kernel spends $99.9\%$ of its time loading the weight matrix from VRAM. Once our cooperative row kernel achieved coalesced, vectorized memory reads (`half2`/`float2`), we immediately saturated the physical VRAM bus.
+## Conclusion
 
-* Our optimized kernels hit **186.4 GB/s (FP16)** and **187.7 GB/s (FP32)**.
-* The hardware limit of the RTX 4050 Laptop GPU is **192.02 GB/s**.
-* **The Tradeoff**: We are running at **97.7% of the physical memory bandwidth** of the chip. Because we are memory-bound, there is no arithmetic optimization that can make this run any faster. This is why our custom kernels and cuBLAS/PyTorch perform practically the same — they have all converged to the physical hardware limit.
+GEMV kernels are fun. Understanding what is compute-heavy and memory-heavy at the kernel level of how neural nets work is pretty cool.
 
-### 4. Standalone Microbenchmarks vs. LLM Serving Performance
+CUDA is a new programming language I explored in this blog. It's a bit low level and even though I struggled here a bit, it's good to see the positive benchmark results.
 
-While it is satisfying to write a custom kernel that runs at 97% of peak bandwidth and slightly beats cuBLAS, this is a **standalone microbenchmark**.
+Benchmarking has been really tough lately. I've been thinking about building some wrapper around this for inference-specific benchmarks.
 
-* In a real LLM serving engine (like vLLM or SGLang), performance is measured by end-to-end serving metrics (Time to First Token, Inter-Token Latency, and max stable concurrency).
-* Since PyTorch and cuBLAS are already hitting the memory bandwidth ceiling for GEMV, replacing them with a custom GEMV kernel will not show any measurable difference in end-to-end serving.
-* **The Takeaway**: Keep this as an educational baseline. Focus custom kernel development on layers that involve element-wise operations and kernel fusion (like RMSNorm, SwiGLU, or RoPE), where we can actually prevent memory traffic from going back to VRAM.
+Thanks for reading! 🙏
