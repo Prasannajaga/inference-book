@@ -113,7 +113,7 @@ SCRIPT_BIN=""
 ARGS=()
 
 if [[ "${BACKEND}" == "vllm" ]]; then
-    VENV_PATH="/data/.venv-vllm"
+    VENV_PATH="/data/nemostation/.venv-vllm"
     PYTHON_BIN="${VENV_PATH}/bin/python"
     SCRIPT_BIN="/data/inference/kernel-swing/serve_vllm.py"
     if [[ ! -f "${SCRIPT_BIN}" ]]; then
@@ -142,7 +142,7 @@ if [[ "${BACKEND}" == "vllm" ]]; then
     ARGS+=("${EXTRA_ARGS[@]}")
 
 elif [[ "${BACKEND}" == "sglang" ]]; then
-    VENV_PATH="/data/.venv-sglang"
+    VENV_PATH="/data/nemostation/.venv-sglang"
     PYTHON_BIN="${VENV_PATH}/bin/python"
     SCRIPT_BIN="${VENV_PATH}/bin/sglang"
     
