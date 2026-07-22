@@ -6,3 +6,4 @@ benchmark_results.json
 benchmark_results.csv
 Qwen3.5-0.8B/
 bench/
+AGENTS.md

@@ -83,6 +83,29 @@ Streaming Response
 - What component owns the KV cache?
 - What component decides when a request reaches the GPU?
 
+### Tokenizer fundamentals
+
+- BPE, SentencePiece, tiktoken
+- why token count ≠ word count
+- chat templates and special tokens
+- token counting for billing and capacity planning
+- tokenizer latency at scale
+
+### Streaming infrastructure
+
+- Server-Sent Events (SSE) vs WebSockets vs HTTP chunked transfer
+- proxy and load balancer configuration for long-lived connections
+- client-side token assembly
+- timeout handling for slow generations
+- streaming interaction with tool calling
+
+### Multimodal and vision-language model ingestion
+
+- image and video preprocessing on GPU before LLM prefill
+- vision encoder token expansion (1,000+ tokens per image)
+- impact on prefill latency and token budgets
+- VLM chunked prefill considerations
+
 ---
 
 ## Day 2 — Prefill vs Decode
@@ -144,6 +167,35 @@ This leads directly to:
 - scheduler design
 - P/D disaggregation
 
+### GPU fundamentals for inference
+
+Understanding why GPU inference is expensive and what hardware constraints drive every optimization in this series.
+
+```text
+Compute Throughput (TFLOPS)
+    ↓
+How fast the GPU does math
+
+Memory Bandwidth (TB/s)
+    ↓
+How fast the GPU reads data
+
+HBM Capacity (GB)
+    ↓
+How much state fits on the GPU
+```
+
+Key concepts:
+
+- GPU architecture at the infrastructure level: streaming multiprocessors, HBM, memory bandwidth
+- why decode is memory-bandwidth-bound (reads all model weights per generated token, very low arithmetic intensity)
+- why prefill is compute-bound (processes many tokens in parallel, high arithmetic intensity)
+- roofline model: determines whether an operation is compute-limited or memory-limited
+- hardware specs that matter for capacity planning: A100 / H100 / H200 / B200
+- NVLink vs PCIe bandwidth (relevant for tensor parallelism in Day 18)
+
+Every optimization in this series exists because GPU memory and bandwidth are scarce and expensive.
+
 ---
 
 ## Day 3 — KV Cache: The State Behind LLM Inference
@@ -160,6 +212,58 @@ Understand why KV cache is one of the main infrastructure constraints in LLM ser
 - why KV memory grows with sequence length
 - how active requests compete for KV memory
 - KV cache quantization (FP8 / INT8 KV cache) and HBM footprint reduction
+- attention architecture variants and their KV cache impact
+
+### Attention architecture variants
+
+Different attention architectures determine KV cache size per token. This directly affects memory planning and maximum concurrency.
+
+```text
+MHA (Multi-Head Attention)
+    Full KV per head
+    Baseline memory cost
+
+MQA (Multi-Query Attention)
+    Shared KV across all heads
+    Much smaller KV footprint
+
+GQA (Grouped-Query Attention)
+    KV shared within groups
+    Middle ground (Llama 3)
+
+MLA (Multi-head Latent Attention)
+    Compressed latent KV
+    Smallest footprint (DeepSeek-V2/V3)
+```
+
+Questions:
+
+- how many KV bytes per token per layer for each variant
+- why GQA allows more concurrent requests than MHA for the same GPU memory
+- how this directly affects the capacity math in Day 30
+
+### Model weight quantization
+
+Quantization is often the single most impactful deployment decision for inference infrastructure.
+
+```text
+70B Model in FP16
+    ~140 GB
+    Requires 2× A100-80GB
+
+70B Model in INT4 (AWQ / GPTQ)
+    ~35 GB
+    Fits on 1× A100-80GB
+```
+
+Cover:
+
+- weight quantization formats: FP16 → FP8 / INT8 / INT4
+- quantization methods for deployment: AWQ, GPTQ, FP8 dynamic, GGUF
+- quality vs throughput trade-offs (when quality degrades noticeably)
+- how quantization interacts with tensor parallelism
+- fast quantized inference kernels: Marlin, Machete
+- when to quantize (almost always) and when not to (quality-critical applications)
 
 ### Mental model
 
@@ -468,6 +572,34 @@ REJECT_TOO_LARGE
 REJECT_OVERLOADED
 ```
 
+### Multi-turn and agentic inference patterns
+
+Production LLM traffic is increasingly stateful and agentic.
+
+```text
+Tool Calling Flow
+
+User Prompt
+    ↓
+Generate (call function)
+    ↓
+Parse Tool Call
+    ↓
+Execute External API
+    ↓
+Re-prompt with Result
+    ↓
+Generate Final Response
+```
+
+Admission control must account for:
+
+- multi-turn conversations with growing context windows across turns
+- tool calling loops: one user action may trigger 5–20 inference calls
+- agentic orchestration: each step compounds KV cache usage and compute
+- session affinity: which pod holds the conversation's KV state
+- estimated total work across a full agentic loop, not just one call
+
 ---
 
 ## Day 10 — Backpressure and Overload Protection
@@ -548,6 +680,24 @@ GPU
 - readiness checks
 - liveness checks
 - startup probes
+
+### Model loading and weight management
+
+- model storage formats: SafeTensors, sharded checkpoints, GGUF
+- model registries: HuggingFace Hub, S3, GCS
+- download optimization: parallel downloads, pre-cached NVMe, shared filesystems (JuiceFS, EFS, Lustre)
+- weight loading sequence: download → shard → load to GPU → NCCL init → ready
+- why startup takes 2–10 minutes for large models
+- container image optimization for large CUDA base images
+
+### Security and multi-tenancy
+
+- API key management and authentication
+- per-tenant rate limiting and quotas
+- data isolation (KV cache contains user data)
+- prompt injection screening from an infrastructure perspective
+- audit logging for compliance
+- model access control: which tenants can access which models
 
 ---
 
@@ -837,6 +987,16 @@ Replicate the model and serve independent request groups.
 
 Distribute Mixture-of-Experts (MoE) experts across workers (e.g. DeepSeek-V2/V3, Mixtral, Qwen-MoE).
 
+MoE inference infrastructure details:
+
+- expert routing: how the gating network selects active experts per token
+- expert load balancing: uneven expert activation creates GPU utilization imbalance
+- capacity factor: limiting how many tokens each expert processes
+- all-to-all communication overhead: tokens must reach the GPU holding the selected expert
+- memory implications: MoE models have more total parameters but fewer active per token
+- DeepSeek-V2/V3: shared experts + routed experts + MLA attention
+- infrastructure impact: expert placement strategy across GPUs and nodes
+
 ### Comparison
 
 ```text
@@ -892,70 +1052,77 @@ Once inference crosses machines, network performance becomes part of model perfo
 
 ---
 
-# Phase 6 — Prefill/Decode Disaggregation
+# Phase 6 — Disaggregated Inference Serving (E/P/D Topologies)
 
-## Day 21 — Why Disaggregate Prefill and Decode?
+## Day 21 — Disaggregation Topologies: EPD, P/D, E/PD, and E/P/D
 
 ### Goal
 
-Understand why separate worker pools can make sense.
+Understand why separating multimodal encoding, prefill, and decode onto specialized worker pools optimizes LLM & VLM inference latency and resource utilization.
+
+### Disaggregation Topologies
 
 ```text
-Incoming Request
-      ↓
-Prefill Pool
-      ↓
-KV Transfer
-      ↓
-Decode Pool
-      ↓
-Generated Tokens
+1. EPD  (No Disaggregation)  : [Encode + Prefill + Decode] on 1 Worker
+2. P/D  (Prefill / Decode)   : [Encode + Prefill Worker] ──KV Transfer──> [Decode Worker]
+3. E/PD (Encode / P-D)       : [Encode Worker] ──Embeddings──> [Prefill + Decode Worker]
+4. E/P/D (Full 3-Stage Split): [Encode Worker] ──Embeddings──> [Prefill Worker] ──KV Transfer──> [Decode Worker]
+```
+
+### Multimodal Encode Disaggregation Workflow
+
+For multimodal requests (images, video, audio), vision encoders generate massive token overhead (1,000+ tokens per image). Offloading encoding to dedicated GPU workers isolates heavy vision processing from autoregressive decode workers.
+
+```text
+Client
+  ↓
+Inference Gateway / Envoy
+  ↓ (Headers: x-encoder-hosts-ports, x-prefiller-host-port)
+Decode Worker Sidecar
+  ├── 1. Send multimodal content ──> [Encode Worker] (Processes image/video, returns embedding metadata)
+  ├── 2. Send prompt + embeddings ─> [Prefill Worker] (Reads embeddings via EC_Connector, generates KV cache)
+  └── 3. Execute local decode ─────> [Decode Worker] (Reads KV cache, streams generated tokens to client)
 ```
 
 ### Cover
 
-- different compute characteristics
-- independent scaling
-- long-prefill interference
-- TTFT
-- TPOT
-- resource specialization
+- **Disaggregation Topologies**: EPD, P/D (EP/D), E/PD, and full E/P/D
+- **Encode Worker Role**: Processing multimodal inputs (images, video, audio) into embedding references
+- **Sidecar Coordination**: Decode-sidecar orchestration of `x-encoder-hosts-ports` and `x-prefiller-host-port` headers
+- **Stage Deciders**: `prefix-based-pd-decider` and `always-disagg-multimodal-decider` logic
+- **Trade-offs**: TTFT vs TPOT, network hop overhead (encode → prefill → decode), and stranded memory risks
 
 ---
 
-## Day 22 — KV Transfer in P/D Disaggregation
+## Day 22 — KV & Embedding Transfer in Disaggregated Serving
 
 ### Goal
 
-Understand the infrastructure cost introduced by separating prefill and decode.
+Understand the transfer mechanisms, sidecar protocols, and connectors that enable high-speed data movement between Encode, Prefill, and Decode workers.
 
-### Flow
+### Data Movement Pipeline
 
 ```text
-Prefill Worker
-      ↓
-Create KV
-      ↓
-Transfer KV
-      ↓
-Decode Worker
-      ↓
-Continue Generation
+[Encode Worker]
+      │
+      │ Embeddings (EC_Connector)
+      ▼
+[Prefill Worker]
+      │
+      │ KV Cache (Nixl / Mooncake / OffloadingConnector / P2P)
+      ▼
+[Decode Worker]
 ```
 
 ### Cover
 
-- KV transfer latency
-- GPU-to-GPU transfer
-- host staging
-- RDMA concepts
-- networking requirements
-- transfer overlap
-- scheduling coordination
-
-### Key question
-
-> When does the benefit of separating prefill and decode outweigh the cost of moving KV state?
+- **Embedding Transfer**: `EC_Connector` for reading multimodal embedding references between Encode and Prefill workers
+- **KV Transfer Connectors**:
+  - `OffloadingConnector`: KV transfer over host CPU memory tier and P2P secondary tier
+  - `NixlConnector`: NIXL-based GPU-Direct / RDMA KV transfer
+  - `MooncakeConnector`: RDMA-accelerated KV transfer for Mooncake architecture
+- **Sidecar Responsibilities**: Header parsing, validation of encode/prefill responses, pre-allocation of KV blocks, and zero-sidecar lightness on prefill/encode nodes
+- **Labeling & Filtering**: Kubernetes `EndpointPickerConfig` label matching (`llm-d.ai/role`: `encode`, `prefill`, `decode`, `encode-prefill-decode`)
 
 ---
 
@@ -987,6 +1154,9 @@ Reuse cached KV
 - repeated conversations
 - RAG prefixes
 - cache hit rate
+- multi-turn conversation prefix reuse
+- session affinity and prefix caching interaction
+- agentic loop prefix reuse across tool-calling rounds
 
 ---
 
@@ -1291,19 +1461,30 @@ Admission Control
    └── Route to Fallback Model
 ```
 
-### Fault tolerance
+### Production Cluster Fault Tolerance & High Availability
+
+Inference clusters fail differently than traditional web apps due to stateful KV caches, multi-GPU NCCL bindings, and expensive GPU hardware failures.
+
+```text
+Cluster Failure Signal
+   ↓
+Automated Detection (XID / Watchdog / Readiness)
+   ↓
+Isolation & Fast Eviction (Remove Pod from Endpoint Picker)
+   ↓
+Inflight Failover / Graceful Degradation
+```
 
 Cover:
 
-- pod failure
-- GPU failure
-- node failure
-- health checks
-- endpoint removal
-- retries
-- retry storms
-- fallback models
-- graceful degradation
+- **Inflight Request Resiliency**:
+  - mid-generation client disconnections: immediately canceling decode steps to reclaim allocated KV cache
+  - transparent prefill retries: automatically re-routing prefill onto alternate healthy replicas when a worker pod dies mid-request
+
+- **Cluster & Kubernetes Resilience**:
+  - Pod Disruption Budgets (PDBs) for GPU nodes: preventing K8s node drains during long-running generation phases
+  - zero-downtime rolling updates: warm-loading 100GB+ checkpoints on new pods before updating Gateway routing endpoints
+  - Multi-AZ & Cross-Region Failover: high availability strategies when facing localized GPU shortages or cloud availability zone failures
 
 ---
 
@@ -1380,6 +1561,24 @@ Number of GPU nodes required
 Cost per 1M tokens
 ```
 
+### Cost modeling
+
+```text
+GPU-hours per request type (short prompt vs long prompt)
+
+Spot vs reserved vs on-demand GPU pricing
+
+Quantization impact on GPU count and total cost
+
+Right-sizing GPU selection for workload (A100 vs H100 vs L40S)
+
+Batch size optimization: throughput vs cost per token
+
+Multi-model serving: running multiple small models per GPU
+
+Cache hit rate impact on cost (prefix reuse avoids recomputation)
+```
+
 ### Final architecture
 
 ```text
@@ -1452,21 +1651,22 @@ Autoscaling + Capacity Decisions
 
 ---
 
-# Complete 30-Day Map
+# Complete Series Map
 
 | Day | Topic |
 |---|---|
-| 1 | LLM Request Lifecycle |
-| 2 | Prefill vs Decode |
-| 3 | KV Cache Fundamentals & Quantization (FP8/INT8) |
+| 0 | [Prerequisites & Roadmap](Day0.md) |
+| 1 | LLM Request Lifecycle, Tokenization, Streaming & VLM Ingestion |
+| 2 | Prefill vs Decode & GPU Fundamentals for Inference |
+| 3 | KV Cache, Attention Variants (MHA/MQA/GQA/MLA) & Model Quantization |
 | 4 | Inside vLLM and SGLang (RadixTree & CUDA Graphs) |
 | 5 | PagedAttention, FlashAttention, and FlashDecoding |
 | 6 | Continuous Batching |
 | 7 | Inference Scheduler & Guided Generation Overhead |
 | 8 | Chunked Prefill |
-| 9 | Admission Control & Guardrails |
+| 9 | Admission Control, Guardrails & Multi-Turn/Agentic Patterns |
 | 10 | Backpressure and Overload Protection |
-| 11 | Production Model Deployment |
+| 11 | Production Deployment, Model Loading & Security |
 | 12 | Multi-Pod Replication & Multi-LoRA Serving |
 | 13 | Why Round-Robin Fails for LLMs |
 | 14 | Prefix-Cache-Aware Routing |
@@ -1474,18 +1674,18 @@ Autoscaling + Capacity Decisions
 | 16 | Gateway, InferencePool, and Endpoint Picker |
 | 17 | Inference Router Data Plane |
 | 18 | Tensor Parallelism |
-| 19 | TP, PP, DP, and EP (MoE Architectures) |
+| 19 | TP, PP, DP, and EP (MoE Architecture Details) |
 | 20 | Multi-Node Inference & Spot Resiliency |
-| 21 | P/D Disaggregation |
-| 22 | KV Transfer Between Prefill and Decode |
-| 23 | Prefix Caching |
+| 21 | Disaggregation Topologies: EPD, P/D, E/PD, and E/P/D |
+| 22 | KV & Multimodal Embedding Transfer (EC_Connector, Nixl, Mooncake) |
+| 23 | Prefix Caching & Multi-Turn Reuse |
 | 24 | KV Cache Affinity, Quantization, and Offloading |
 | 25 | Speculative Decoding |
 | 26 | Autoscaling Signals |
 | 27 | Pod Autoscaling and GPU Node Autoscaling |
 | 28 | Cold Starts, Scale-to-Zero, and Predictive Scaling |
-| 29 | Observability, SLOs, Fault Tolerance, and Graceful Degradation |
-| 30 | Benchmarking, Capacity Planning, and Final Production Architecture |
+| 29 | Observability, SLOs & Cluster Fault Tolerance (GPU/NCCL Failures & HA) |
+| 30 | Benchmarking, Capacity Planning, Cost Modeling & Final Architecture |
 
 ---
 

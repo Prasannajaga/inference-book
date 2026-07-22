@@ -1,341 +1,59 @@
-# AGENTS.md
+## 30-Day Series
 
-## Project Goal
+The `30-day-series/` directory contains a 30-day content series on LLM inference infrastructure. Every day file lives inside this directory and follows the same template and writing style.
 
-This project is for proving whether a custom GPU kernel can improve real LLM inference serving performance for one open-weight model.
+### Template
 
-Each model lives in its own directory (for example `Qwen3.5-0.8B/`) and contains its own implementation files such as `modeling_qwen.py`, `rmsnorm.py`, and `swiglu.py`. All model-specific optimizations, patches, and experiments must stay inside that model directory.
-
-The goal is not to write kernels blindly. The goal is to profile, identify a real bottleneck inside a specific model directory, implement one targeted kernel, and keep it only if end-to-end serving performance improves.
-
-Target serving engines:
-
-* vLLM
-* SGLang
-
-Initial kernel target:
-
-* Start with RMSNorm (inside the model directory, e.g. `Qwen3.5-0.8B/rmsnorm.py`)
-* Then try SiLU + Mul / SwiGLU (e.g. `Qwen3.5-0.8B/swiglu.py`)
-* Then RoPE
-* Do not start with attention, paged attention, KV-cache layout, or custom GEMM
-
-## Core Rule
-
-Never write or integrate a custom kernel before profiling.
-
-A kernel is only useful if it improves real serving metrics:
-
-* TTFT: time to first token
-* ITL: inter-token latency
-* output tokens/sec
-* requests/sec
-* p50/p95/p99 latency
-* GPU memory usage
-* max stable concurrency
-
-If the kernel improves only a microbenchmark but does not improve serving performance, reject it.
-
-## Non-Goals
-
-Do not build a new serving engine.
-Do not rewrite vLLM or SGLang scheduling.
-Do not write custom attention first.
-Do not write custom matmul/GEMM first.
-Do not optimize without a baseline.
-Do not claim performance wins without reproducible benchmark data.
-
-## Six-Phase Workflow
-
-### Phase 1: Baseline Serving Benchmark
-
-Run the selected model directory (for example `Qwen3.5-0.8B/`) using `serve.sh` or `serve_vllm.py` without any custom kernel modifications.
-
-Capture:
-
-* model name (directory name)
-* quantization mode
-* GPU name
-* GPU memory
-* CUDA version
-* PyTorch version
-* vLLM/SGLang version
-* prompt length
-* output length
-* concurrency
-* TTFT
-* ITL
-* tokens/sec
-* requests/sec
-* p50/p95/p99 latency
-* GPU memory usage
-* GPU utilization
-
-Benchmark workloads:
-
-* short prompt, short output
-* short prompt, long output
-* long prompt, short output
-* long prompt, long output
-* low concurrency
-* medium concurrency
-* high concurrency until latency degrades
-
-Required output (inside the model directory):
+Every day file must follow this structure exactly:
 
 ```text
-Qwen3.5-0.8B/reports/baseline_results.jsonl
-Qwen3.5-0.8B/reports/baseline_summary.md
-Qwen3.5-0.8B/reports/plots/
+Day N/30 of inference infrastructure
+
+<title>
+
+<small description about the previous conversation>
+
+<deep dive into the current topics>
 ```
 
-Do not move to Phase 2 until baseline numbers exist.
+The template file is at `30-day-series/template.txt`. Do not deviate from it.
 
-### Phase 2: Profile Bottlenecks
+### Writing Style
 
-Profile the baseline run before changing kernels.
+The author's voice is conversational, direct, and momentum-driven. Match these traits in every day file:
 
-Use at least one of:
+* **Lowercase-first, informal punctuation.** Sentences do not need to start with a capital letter. Punctuation is minimal — no semicolons, no em-dashes for dramatic effect. Write the way you would talk to a friend who asked you to explain something.
+* **Direct address.** Always talk to the reader as "you". Never use "one" or "the reader" or "users".
+* **Short paragraphs, fast pacing.** Move topic to topic quickly. No filler. No padding. If a paragraph is longer than four lines, break it up.
+* **Explain by example first, then name the concept.** Show what happens ("you ask chatgpt and you get the response back"), then explain why ("but what happens in between — thats what we see"). Do not define a term and then show an example. Reverse it.
+* **No jargon gating.** Assume curiosity, not credentials. If a concept needs prior knowledge, say what to look up, do not say "you should already know this".
+* **Honest scope-setting, framed positively.** State what the series covers. When narrowing scope, frame it as focus ("we focus on high level infrastructure") not exclusion ("this is not about kernels"). Lead with what you will do, not what you will not do.
+* **Stream-of-consciousness flow.** The intro section of each day should read like spoken thought — natural, not rehearsed. The deep-dive section can be more structured with headers, code blocks, tables, and diagrams.
 
-* PyTorch profiler
-* Nsight Systems
-* Nsight Compute
-* vLLM/SGLang internal metrics
-* nvidia-smi logs
+### Tone Rules
 
-Identify where time is spent:
+These are hard constraints. Violating them means the draft needs a rewrite.
 
-* attention
-* GEMM
-* RMSNorm
-* RoPE
-* activation
-* sampling
-* KV-cache movement
-* scheduler overhead
-* tokenization
-* HTTP overhead
+1. **No negativity in the opening.** The first 10–15 lines of every day must feel welcoming and energizing. No words like "overwhelming", "hard", "struggle", "never give up", "disclaimer". If you need to set expectations, do it positively ("this series is focused on X" not "this series does not cover Y").
+2. **No rhetorical put-downs.** Do not ask a question and immediately dismiss it ("does this require any knowledge, well no"). Either ask the question and answer it generously, or skip the question entirely.
+3. **No apology framing.** Do not open with disclaimers about what the series is not. If scope is limited, state the scope positively and move on.
+4. **Curiosity over credentials.** The only prerequisite is wanting to learn. Do not list things the reader "must know" in a way that makes them feel gated. If background is helpful, frame it as "if you have seen X before, great — if not, here is what it means".
+5. **Forward momentum.** Every section should make the reader want to read the next one. End sections with a hook or a question, not a summary.
 
-Required output (inside the model directory):
+### Content Rules
 
-```text
-Qwen3.5-0.8B/reports/profile_summary.md
-Qwen3.5-0.8B/reports/profiles/
-```
+* Each day must reference what was covered in the previous day in the `<small description about the previous conversation>` section. Day 0 is the exception.
+* Code blocks, ASCII diagrams, and tables are encouraged in the deep-dive section.
+* Keep the total length between 300 and 600 lines. Under 300 feels thin. Over 600 loses attention.
+* Do not repeat content that was already covered in a previous day. Reference it with "we saw this on Day N" and move on.
 
-The profile summary must answer:
+### Agent Behavior for 30-Day Series
 
-1. Which operation is hot?
-2. How much time does it consume?
-3. Is it hot in prefill, decode, or both?
-4. Why is this operation a valid kernel target?
-5. What existing implementation is used today (e.g. `rmsnorm.py`, `swiglu.py`)?
+When asked to write or edit a day file:
 
-Do not write a kernel unless the profile justifies it.
-
-### Phase 3: Implement One Small Kernel
-
-Implement only one kernel target at a time inside the model directory.
-
-First target:
-
-```text
-RMSNorm
-```
-
-Modify or extend:
-
-```text
-Qwen3.5-0.8B/rmsnorm.py
-```
-
-Add supporting files if needed:
-
-```text
-Qwen3.5-0.8B/kernels/
-  rmsnorm_ref.py
-  rmsnorm_triton.py
-
-Qwen3.5-0.8B/tests/
-  test_rmsnorm_correctness.py
-
-Qwen3.5-0.8B/benchmarks/
-  bench_rmsnorm.py
-```
-
-Correctness requirements:
-
-* compare against PyTorch reference
-* test fp16
-* test bf16 if GPU supports it
-* test fp32
-* test decode-like shapes
-* test prefill-like shapes
-* test model hidden size
-* test non-power-of-two token counts
-
-Do not integrate into vLLM or SGLang until standalone correctness and microbenchmark results exist.
-
-### Phase 4: Kernel Microbenchmark
-
-Benchmark kernel variants independently.
-
-Compare:
-
-* PyTorch eager reference
-* torch.compile reference if applicable
-* Triton custom kernel
-* existing implementation inside the model directory
-
-Measure:
-
-* latency in milliseconds
-* bandwidth in GB/s
-* output correctness
-* dtype support
-* shape coverage
-
-Required benchmark shapes:
-
-```text
-Decode-like:
-[1, hidden_dim]
-[4, hidden_dim]
-[8, hidden_dim]
-[16, hidden_dim]
-[32, hidden_dim]
-
-Prefill-like:
-[128, hidden_dim]
-[512, hidden_dim]
-[2048, hidden_dim]
-[8192, hidden_dim]
-```
-
-Required output (inside the model directory):
-
-```text
-Qwen3.5-0.8B/reports/kernel_rmsnorm_results.jsonl
-Qwen3.5-0.8B/reports/kernel_rmsnorm_summary.md
-Qwen3.5-0.8B/reports/plots/
-```
-
-Move forward only if the custom kernel is correct and meaningfully faster for the shapes that matter.
-
-### Phase 5: Serving Engine Integration
-
-Integrate the kernel into one serving engine using the model directory.
-
-Preferred order:
-
-1. SGLang integration if the model path is easier to patch.
-2. vLLM integration if using vLLM CustomOp or a local model layer patch.
-
-Use existing entrypoints:
-
-```text
-serve.sh
-serve_vllm.py
-```
-
-Rules:
-
-* Keep the original path as fallback.
-* Make the custom kernel enable/disable configurable.
-* Do not permanently replace engine internals without an A/B switch.
-* Avoid Python-side dynamic behavior in the hot path.
-* Avoid file I/O, JIT compilation, imports, printing, or CPU sync inside model forward.
-
-SGLang note:
-
-* If the custom kernel is used inside the model forward path, wrap it with SGLang `register_custom_op` when needed for Piecewise CUDA Graph compatibility.
-
-vLLM note:
-
-* If using vLLM custom op path, register a vLLM `CustomOp` and make sure it can be enabled/disabled through custom op configuration.
-
-### Phase 6: End-to-End Serving Benchmark
-
-Run the same benchmark matrix from Phase 1 using the same model directory.
-
-Compare:
-
-* baseline engine
-* custom kernel enabled
-* custom kernel disabled/fallback
-
-Measure:
-
-* TTFT
-* ITL
-* tokens/sec
-* requests/sec
-* p50/p95/p99 latency
-* GPU memory usage
-* max stable concurrency
-
-Required output (inside the model directory):
-
-```text
-Qwen3.5-0.8B/reports/e2e_results.jsonl
-Qwen3.5-0.8B/reports/e2e_summary.md
-Qwen3.5-0.8B/reports/plots/
-```
-
-Final decision must be one of:
-
-```text
-KEEP: custom kernel improves end-to-end serving performance.
-REJECT: custom kernel does not improve end-to-end serving performance.
-REWORK: custom kernel helps only specific shapes or breaks important paths.
-```
-
-Do not call the experiment successful unless end-to-end serving improves.
-
-## Repository Structure
-
-```text
-repo-root/
-  README.md
-  serve.sh
-  serve_vllm.py
-  uv.lock
-
-  Qwen3.5-0.8B/
-    config.json
-    modeling_qwen.py
-    rmsnorm.py
-    swiglu.py
-
-    kernels/
-    benchmarks/
-    tests/
-    reports/
-```
-
-Each model directory is self-contained. All optimizations, kernels, benchmarks, and reports must live inside that model directory.
-
-## Agent Behavior
-
-When asked to implement something, follow this order:
-
-1. Identify which model directory is being worked on.
-2. Check whether the required previous phase output exists inside that directory.
-3. If it does not exist, create the missing phase output first.
-4. If the user asks to skip profiling and write a kernel, reject that path and explain that profiling is required.
-5. If the user asks to start with attention, push back and recommend RMSNorm first.
-6. If the benchmark does not show end-to-end improvement, reject the kernel.
-7. Do not claim success from microbenchmark numbers alone.
-
-## Success Criteria
-
-The project succeeds only if it produces a reproducible answer to this question:
-
-> Can a targeted custom kernel improve real serving performance for this specific model directory on this GPU?
-
-A successful result can be either:
-
-* Yes, the kernel improves serving performance and we keep it.
-* No, the kernel does not improve serving performance and we reject it with evidence.
-
-Both are valid outcomes.
+1. Read the template at `30-day-series/template.txt`.
+2. Read the previous day file to write the recap section.
+3. Follow the writing style and tone rules above exactly.
+4. If the draft has any negativity in the opening, rewrite the opening before presenting.
+5. If the draft uses formal/academic tone, rewrite in conversational voice before presenting.
+6. Do not add content outside the template structure without explicit permission.
