@@ -1,66 +1,30 @@
-# Kernel Swings
+# Inference Book
 
-Everything I learned about kernels goes here.
+This is inference-book. everything you need to know about llm inference from writing custom CUDA kernels to building production cluster infrastructure happens here.
 
-You can find kernel notebooks under `kernels/`.
+## 30-Day Series
 
-## CLI Usage
+- [30-Day LLM Inference Series](30-day-series/README.md)
+  - [Day 0: Prerequisites & Roadmap](30-day-series/day-0/Day0.md)
+  - [Day 1: Request Lifecycle](30-day-series/day-1/Day1.md)
 
-### 1. Serving Models
+## Kernels
 
-Use the root `serve.sh` script to launch the serving backend. This script automates setting up the environment and configuration parameters (such as sequence length and VRAM limits).
+- [CUDA Kernels](kernels/)
+  - [CUDA Matmul Notebook](kernels/basics/matmul.ipynb)
+  - [CUDA Fundamentals Blog](kernels/basics/blog.md)
+  - [GEMV CUDA Kernels](kernels/GEMV/gemv_kernels.cu)
+  - [GEMV C++ PyTorch Bindings](kernels/GEMV/gemv_bindings.cpp)
+  - [GEMV Deep Dive](kernels/GEMV/gemv.md)
+  - [GEMV Benchmark Notebook](kernels/GEMV/gemv_benchmark.ipynb)
 
-#### Serve with vLLM
-```bash
-./serve.sh <model_path> --backend vllm [additional_args...]
-```
-*Example with a local model:*
-```bash
-./serve.sh /data/nemostation/outputs/Marlin-2B-gptq --backend vllm
-```
+## Serving Engines & Runtimes
 
-#### Serve with SGLang
-```bash
-./serve.sh <model_path> --backend sglang [additional_args...]
-```
-*Example with a local model:*
-```bash
-./serve.sh /data/nemostation/outputs/Marlin-2B-gptq --backend sglang
-```
-
----
-
-### 2. Benchmarking
-
-Use `bench/llm_bench.py` to benchmark the running model server.
-
-#### Standard Benchmark
-Runs a fixed number of requests at a set concurrency:
-```bash
-python bench/llm_bench.py --url http://localhost:8000 --requests 50 --concurrency 5
-```
-
-#### Custom Output Directory Name
-Use the `--name` parameter to save results to a specific subdirectory under `--out` (defaults to `bench_results/<name>`):
-```bash
-python bench/llm_bench.py --url http://localhost:8000 --requests 50 --concurrency 5 --name my_benchmark_run
-```
-
-#### Concurrency Sweep
-Runs benchmarking sequentially across a sweep of concurrency levels:
-```bash
-python bench/llm_bench.py --url http://localhost:8000 --concurrency-sweep 1,2,4,8,16 --name my_sweep_run
-```
-
-#### Plotting Existing Results
-If a benchmark run has already completed (and `summary.json` exists in the output folder), you can re-run the same command with `--plot` to generate the plots without running the benchmark again:
-```bash
-python bench/llm_bench.py --url http://localhost:8000 --name my_benchmark_run --plot
-```
-
-#### Isolation / Contamination Test
-Runs a basic concurrent prompt contamination test:
-```bash
-python bench/llm_bench.py --url http://localhost:8000 --isolation-test --requests 10 --concurrency 2
-```
-
+- [vLLM Engine](vllm/)
+  - [vLLM Architecture Deep Dive](vllm/vllm.md)
+  - [vLLM Dev Guide](vllm/dev.md)
+- [SGLang Engine](sglang/)
+  - [SGLang Overview](sglang/sglang.md)
+- [llm-d Router](llm-d/)
+  - [llm-d Design Spec](llm-d/design.md)
+  - [llm-d PR Overview](llm-d/PR.md)
