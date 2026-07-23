@@ -27,4 +27,3 @@ This is inference-book. everything you need to know about llm inference from wri
   - [SGLang Overview](sglang/sglang.md)
 - [llm-d Router](llm-d/)
   - [llm-d Design Spec](llm-d/design.md)
-  - [llm-d PR Overview](llm-d/PR.md)
