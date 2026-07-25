@@ -105,13 +105,3 @@ it is important to note that you do not always need full BF16 or FP16 precision 
 if you run evaluations on lower-bit formats (like FP8 or INT4) using your specific downstream tasks and the output quality holds up, deploying in low-bit precision can save massive compute and hardware costs — sometimes cutting serving infrastructure overhead by orders of magnitude.
 
 run your own evals first. if low-bit quantization passes your quality threshold, you unlock huge savings in VRAM, memory bandwidth, and GPU deployment costs.
-
-# final takeaway
-
-the KV cache is the core persistent state that connects prefill and decode phases in autoregressive LLM inference.
-
-storing Key and Value vectors avoids recomputing attention projections for past prompt tokens, but requires careful memory capacity planning as context lengths and concurrency scale.
-
-understanding the formula for KV memory bytes per token, the structural trade-offs of attention variants like MHA, MQA, GQA, and MLA, and the mechanics of quantization allows you to optimize serving throughput and maximize hardware efficiency.
-
-tomorrow on Day 4, we step inside engine architectures to explore how schedulers, block managers, and paged attention execute this state management in real time.
