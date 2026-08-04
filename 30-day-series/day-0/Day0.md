@@ -33,8 +33,8 @@ graph TD
 
     subgraph P2["Phase 2: Single GPU Efficiency — Days 6–10"]
         D6["Day 6: Continuous Batching"]
-        D7["Day 7: Scheduler Policy"]
-        D8["Day 8: Chunked Prefill"]
+        D7["Day 7: Chunked Prefill"]
+        D8["Day 8: Scheduler Policy"]
         D9["Day 9: Admission Control"]
         D10["Day 10: Overload & Backpressure"]
     end
