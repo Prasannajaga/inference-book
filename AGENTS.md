@@ -46,6 +46,7 @@ These are hard constraints. Violating them means the draft needs a rewrite.
 * Code blocks, ASCII diagrams, and tables are encouraged in the deep-dive section.
 * Keep the total length between 300 and 600 lines. Under 300 feels thin. Over 600 loses attention.
 * Do not repeat content that was already covered in a previous day. Reference it with "we saw this on Day N" and move on.
+* **Fact-verification and primary-source grounding.** Never guess, hallucinate, or state systems behaviors, syscalls, or latency numbers randomly. Ground all architectural explanations (e.g. CRIU, CUDA VMM, kernel mechanisms, and framework internals) strictly in verified primary documentation or published engineering sources.
 
 ### Agent Behavior for 30-Day Series
 
